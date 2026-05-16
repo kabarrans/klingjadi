@@ -14,6 +14,7 @@ export default function App() {
   const [videoInputMode, setVideoInputMode] = useState('url');
   const [imageUrl, setImageUrl] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
+  const [prompt, setPrompt] = useState('');
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [progressText, setProgressText] = useState('');
@@ -51,12 +52,28 @@ export default function App() {
     }
   };
 
-  const toBase64 = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = error => reject(error);
-  });
+  // Fungsi untuk Upload file ke server Publik (Catbox.moe) agar bisa dibaca Magnific
+  const uploadToCatbox = async (file, fileType) => {
+    setProgressText(`Mengunggah ${fileType} ke server publik (Catbox)...`);
+    const formData = new FormData();
+    formData.append("reqtype", "fileupload");
+    formData.append("fileToUpload", file);
+
+    try {
+      // Gunakan proxy agar tidak terkena block CORS saat upload
+      const fetchUrl = getFetchUrl('https://catbox.moe/user/api.php');
+      const res = await fetch(fetchUrl, {
+        method: "POST",
+        body: formData
+      });
+      
+      if (!res.ok) throw new Error("Upload gagal");
+      const url = await res.text();
+      return url;
+    } catch (error) {
+      throw new Error(`Gagal mengamankan link publik untuk ${fileType}. Pastikan Ekstensi CORS menyala.`);
+    }
+  };
 
   // Fungsi untuk membangun URL dengan Proxy yang dipilih
   const getFetchUrl = (targetUrl) => {
@@ -76,32 +93,52 @@ export default function App() {
       let finalImageUrl = '';
       let finalVideoUrl = '';
 
-      if (imageInputMode === 'url') {
-        if (!imageUrl.trim()) throw new Error("URL Foto Referensi tidak boleh kosong!");
-        finalImageUrl = imageUrl.trim();
-      } else {
-        if (!imageFile) throw new Error("Harap unggah Foto Referensi terlebih dahulu!");
-        finalImageUrl = await toBase64(imageFile);
-      }
-
-      if (videoInputMode === 'url') {
-        if (!videoUrl.trim()) throw new Error("URL Video Referensi tidak boleh kosong!");
-        finalVideoUrl = videoUrl.trim();
-      } else {
-        if (!videoFile) throw new Error("Harap unggah Video Referensi terlebih dahulu!");
-        finalVideoUrl = await toBase64(videoFile);
-      }
-
       setIsGenerating(true);
       setErrorMsg('');
       setResultVideo(null);
-      setProxyCount(prev => (prev > 0 ? prev - 1 : 49));
-      setProgressText(`Mengirim payload via ${proxyType === 'none' ? 'Koneksi Langsung' : proxyType}...`);
+      setProxyCount(prev => (prev > 0 ? prev - 1 : 49)); 
+
+      // 1. Siapkan Gambar
+      if (imageInputMode === 'url') {
+        if (!imageUrl.trim()) throw new Error("URL Foto Referensi tidak boleh kosong!");
+        if (imageUrl.includes("discord") || imageUrl.includes("imgur")) {
+          throw new Error("Discord dan Imgur memblokir akses bot AI. Tolong gunakan mode 'Lokal File' atau gunakan link dari Postimages.org");
+        }
+        finalImageUrl = imageUrl.trim();
+      } else {
+        if (!imageFile) throw new Error("Harap unggah Foto Referensi terlebih dahulu!");
+        finalImageUrl = await uploadToCatbox(imageFile, "Gambar Referensi");
+      }
+
+      // 2. Siapkan Video
+      if (videoInputMode === 'url') {
+        if (!videoUrl.trim()) throw new Error("URL Video Referensi tidak boleh kosong!");
+        if (videoUrl.includes("discord") || videoUrl.includes("imgur")) {
+          throw new Error("Discord memblokir akses bot AI. Tolong gunakan mode 'Lokal File' agar sistem mengunggahnya dengan aman ke server sementara.");
+        }
+        finalVideoUrl = videoUrl.trim();
+      } else {
+        if (!videoFile) throw new Error("Harap unggah Video Referensi terlebih dahulu!");
+        finalVideoUrl = await uploadToCatbox(videoFile, "Video Motion");
+      }
+
+      setProgressText('Mengirim payload ke server Magnific Kling Pro...');
+
+      // Susun Payload untuk Magnific
+      const payload = {
+        image_url: finalImageUrl,
+        video_url: finalVideoUrl,
+        character_orientation: 'video',
+        cfg_scale: 0.5
+      };
+
+      if (prompt.trim()) {
+        payload.prompt = prompt.trim();
+      }
 
       const apiUrl = 'https://api.magnific.com/v1/ai/video/kling-v3-motion-control-pro';
       const fetchUrl = getFetchUrl(apiUrl);
 
-      // POST Request untuk mengantri Task
       const submitResponse = await fetch(fetchUrl, {
         method: 'POST',
         headers: {
@@ -109,12 +146,7 @@ export default function App() {
           'Accept': 'application/json',
           'x-magnific-api-key': apiKey
         },
-        body: JSON.stringify({
-          image_url: finalImageUrl,
-          video_url: finalVideoUrl,
-          character_orientation: 'video',
-          cfg_scale: 0.5
-        })
+        body: JSON.stringify(payload)
       });
 
       if (!submitResponse.ok) {
@@ -170,11 +202,11 @@ export default function App() {
             setResultVideo(resultUrl);
             setProgressText('Selesai! Video berhasil di-render!');
           } else {
-            throw new Error('Video selesai diproses tetapi URL video kosong.');
+            throw new Error('Video selesai diproses tetapi URL video kosong dari Magnific.');
           }
         } 
         else if (status === 'FAILED' || status === 'ERROR') {
-          throw new Error(statusDetails.error || statusDetails.message || 'Generasi video gagal di sisi Magnific.');
+          throw new Error(statusDetails.error || statusDetails.message || 'Generasi dibatalkan oleh Magnific. Alasan paling umum: Video referensi Anda tidak bisa dibaca, terlalu panjang, atau resolusi gambar tidak kompatibel.');
         }
       }
 
@@ -236,15 +268,24 @@ export default function App() {
         <div className="bg-[#121214] border border-purple-500/20 rounded-2xl p-5 mb-8 shadow-inner">
           <label className="flex items-center gap-2 text-sm font-medium text-gray-300 mb-3">
             <Settings className="w-4 h-4 text-purple-400" />
-            Magnific API Key
+            Pengaturan API & Parameter
           </label>
-          <input 
-            type="password" 
-            placeholder="Masukkan x-magnific-api-key (Contoh: mag_xxxxxxxxxxx)" 
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            className="w-full bg-[#09090b] border border-gray-800 rounded-lg px-4 py-3 text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all font-mono text-sm"
-          />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <input 
+              type="password" 
+              placeholder="Masukkan API Key Magnific (mag_...)" 
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              className="w-full bg-[#09090b] border border-gray-800 rounded-lg px-4 py-3 text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all font-mono text-sm"
+            />
+            <input 
+              type="text" 
+              placeholder="Prompt (Opsional): Contoh 'a realistic knight'" 
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              className="w-full bg-[#09090b] border border-gray-800 rounded-lg px-4 py-3 text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all text-sm"
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
